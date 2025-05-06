@@ -13,7 +13,7 @@ void BatteryStats::numBattery() {
     fs::path path("/sys/class/power_supply/");
     for (auto& p : fs::directory_iterator(path)) {
         string fileName = p.path().filename();
-        if (fileName.find("BAT") != std::string::npos) {
+        if (fileName.find("battery") != std::string::npos) {
             battPath[batteryCount] = p.path();
             batteryCount += 1;
         }
@@ -30,15 +30,14 @@ void BatteryStats::update() {
         }
     }
 
-     if (batt_count > 0) {
+    if (batt_count > 0) {
         current_watt = getPower();
         current_percent = getPercent();
         remaining_time = getTimeRemaining();
     }
 }
 
-float BatteryStats::getPercent()
-{
+float BatteryStats::getPercent() {
     float charge_n = 0;
     float charge_f = 0;
     for(int i = 0; i < batt_count; i++) {
@@ -74,8 +73,6 @@ float BatteryStats::getPercent()
         }
 
         else {
-            // using /sys/class/power_supply/BAT*/capacity
-            // No way to get an accurate reading just average the percents if mutiple batteries
             std::ifstream input(capacity);
             std::string line;
             if(std::getline(input, line)) {
@@ -108,30 +105,37 @@ float BatteryStats::getPower() {
             return 0;
         }
 
-        if (fs::exists(current_power)) {
-            std::ifstream input(current_power);
-            std::string line;
-            if(std::getline(input,line)) {
-                current += (stof(line) / 1000000);
+        if (fs::exists(current_power) && fs::exists(current_voltage)) {
+            std::ifstream input_current(current_power);
+            std::ifstream input_voltage(current_voltage);
+
+            if (std::getline(input_current, line)) {
+                current = stof(line) / 1000000;  // Convert from microamps to amps
             }
-            std::ifstream input2(current_voltage);
-            if(std::getline(input2, line)) {
-                voltage += (stof(line) / 1000000);
+
+            if (std::getline(input_voltage, line)) {
+                voltage = stof(line) / 1000000;  // Convert from microvolts to volts
+            }
+
+            // Calculate power in watts
+            if (voltage > 0) {
+                return current * voltage;  // Power = Current * Voltage
             }
         }
+
         else {
+            // Fallback if "current_now" and "voltage_now" are not available
             std::ifstream input(power_now);
-            std::string line;
-            if(std::getline(input,line)) {
+            if(std::getline(input, line)) {
                 current += (stof(line) / 1000000);
-                voltage = 1;
+                voltage = 1;  // Set voltage to 1 to avoid division by zero
             }
         }
     }
-    return current * voltage;
+    return current * voltage;  // If fallback was used, return the calculated power
 }
 
-float BatteryStats::getTimeRemaining(){
+float BatteryStats::getTimeRemaining() {
     float current = 0;
     float charge = 0;
     for(int i = 0; i < batt_count; i++) {
