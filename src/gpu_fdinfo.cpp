@@ -366,7 +366,7 @@ int GPU_fdinfo::get_xe_load()
 
     return std::lround(load);
 }
-
+/*
 int GPU_fdinfo::get_gpu_load()
 {
     if (module == "xe")
@@ -396,6 +396,17 @@ int GPU_fdinfo::get_gpu_load()
     previous_time = now;
 
     return std::round(result);
+}
+*/
+
+int GPU_fdinfo::get_gpu_load()
+{
+    // শুধুমাত্র Adreno/KGSL জন্য
+    if (module == "msm_drm" || module == "kgsl_adreno")
+        return get_kgsl_load();
+
+    // অন্য GPU modules unsupported
+    return 0;
 }
 
 void GPU_fdinfo::find_i915_gt_dir()
@@ -635,7 +646,7 @@ float GPU_fdinfo::amdgpu_helper_get_proc_vram() {
 
     return get_memory_used();
 }
-
+/*
 void GPU_fdinfo::init_kgsl() {
     const std::string sys_path = "/sys/class/kgsl/kgsl-3d0";
 
@@ -665,7 +676,35 @@ void GPU_fdinfo::init_kgsl() {
             kgsl_streams[metric].open(p);
     }
 }
+*/
 
+void GPU_fdinfo::init_kgsl() {
+    const std::string sys_path = "/sys/class/kgsl/kgsl-3d0";
+    const std::string gpubusy_path = sys_path + "/gpubusy";
+
+    try {
+        // check only the gpubusy file
+        if (!fs::exists(gpubusy_path)) {
+            SPDLOG_WARN("kgsl: {} is not found. GPU load will not work!", gpubusy_path);
+            return;
+        }
+    } catch (fs::filesystem_error& ex) {
+        SPDLOG_WARN("kgsl: {}", ex.what());
+        return;
+    }
+
+    // Open only gpubusy
+    kgsl_streams.clear();
+    kgsl_streams["gpu_busy_percentage"].open(gpubusy_path);
+
+    if (!kgsl_streams["gpu_busy_percentage"].is_open()) {
+        SPDLOG_WARN("kgsl: failed to open {}", gpubusy_path);
+    } else {
+        SPDLOG_DEBUG("kgsl: {} successfully opened", gpubusy_path);
+    }
+}
+
+/*
 int GPU_fdinfo::get_kgsl_load() {
     std::ifstream* s = &kgsl_streams["gpu_busy_percentage"];
 
@@ -683,7 +722,38 @@ int GPU_fdinfo::get_kgsl_load() {
 
     return std::stoi(usage_str);
 }
+*/
 
+int GPU_fdinfo::get_kgsl_load() {
+    std::ifstream* s = &kgsl_streams["gpu_busy_percentage"];
+
+    if (!s->is_open())
+        return 0;
+
+    std::string line;
+    s->clear();
+    s->seekg(0);
+    std::getline(*s, line);
+
+    if (line.empty())
+        return 0;
+
+    // line format: "active_time total_time"
+    uint64_t active = 0, total = 0;
+    std::istringstream iss(line);
+    iss >> active >> total;
+
+    if (total == 0)
+        return 0;
+
+    float load = static_cast<float>(active) / static_cast<float>(total) * 100.f;
+
+    if (load > 100.f)
+        load = 100.f;
+
+    return std::round(load);
+}
+/*
 int GPU_fdinfo::get_kgsl_temp() {
     std::ifstream* s = &kgsl_streams["temp"];
 
@@ -700,6 +770,48 @@ int GPU_fdinfo::get_kgsl_temp() {
         return 0;
 
     return std::round(std::stoi(temp_str) / 1'000.f);
+}
+*/
+
+int GPU_fdinfo::get_kgsl_temp() {
+    // First, try kgsl temp if available
+    std::ifstream* s = &kgsl_streams["temp"];
+    if (s->is_open()) {
+        std::string temp_str;
+        s->seekg(0);
+        std::getline(*s, temp_str);
+
+        if (!temp_str.empty())
+            return std::round(std::stoi(temp_str) / 1'000.f);
+    }
+
+    // Fallback: read from thermal_zone* gpuss entries
+    int max_temp = 0;
+    const std::string thermal_path = "/sys/class/thermal";
+
+    for (const auto &tz : fs::directory_iterator(thermal_path)) {
+        std::ifstream type_file(tz.path() / "type");
+        std::ifstream temp_file(tz.path() / "temp");
+        if (!type_file.is_open() || !temp_file.is_open())
+            continue;
+
+        std::string type;
+        std::getline(type_file, type);
+        if (type.find("gpuss") == std::string::npos)
+            continue;
+
+        std::string t_str;
+        std::getline(temp_file, t_str);
+
+        try {
+            int t = std::stoi(t_str);
+            if (t > max_temp)
+                max_temp = t;
+        } catch (...) { continue; }
+    }
+
+    // milli-degree → °C
+    return max_temp / 1000;
 }
 
 void GPU_fdinfo::main_thread()
@@ -737,7 +849,7 @@ void GPU_fdinfo::main_thread()
         metrics.CoreClock = get_gpu_clock();
         metrics.voltage = hwmon_sensors["voltage"].val;
 
-        if (module == "msm_drm")
+        if (module == "msm_drm" || module == "kgsl_adreno")
             metrics.temp = get_kgsl_temp();
         else
             metrics.temp = hwmon_sensors["temp"].val / 1000.f;

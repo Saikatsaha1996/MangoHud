@@ -146,7 +146,8 @@ public:
         } else if (module == "msm_dpu") {
             // msm driver does not report vram usage
             drm_engine_type = "drm-engine-gpu";
-        } else if (module == "msm_drm") {
+        } else if (module == "msm_drm" || module == "kgsl_adreno") {
+            // KGSL Adreno GPU
             init_kgsl();
         } else if (module == "panfrost") {
             drm_engine_type = "drm-engine-fragment";
@@ -156,33 +157,12 @@ public:
             drm_memory_type = "drm-resident-memory";
         }
 
-        if (fdinfo_data.size() > 0 &&
-            fdinfo_data[0].find(drm_memory_type) == fdinfo_data[0].end())
-        {
-            auto old_type = drm_memory_type;
-
-            if (module == "i915")
-                drm_memory_type = "drm-resident-system0";
-            else if (module == "xe")
-                drm_memory_type = "drm-resident-gtt";
-
-            SPDLOG_DEBUG(
-                "\"{}\" is not found, you probably have an integrated GPU. "
-                "Using \"{}\"", old_type, drm_memory_type
-            );
-        }
-
         SPDLOG_DEBUG(
             "drm_engine_type = {}, drm_memory_type = {}",
             drm_engine_type, drm_memory_type
         );
 
-        if (called_from_amdgpu_cpp)
-            return;
-
-        // i915: Documentation/ABI/testing/sysfs-driver-intel-i915-hwmon
-        // xe  : Documentation/ABI/testing/sysfs-driver-intel-xe-hwmon
-
+        // Initialize hwmon sensors (voltage, fan, temp, etc.)
         if (module == "i915") {
             hwmon_sensors["voltage"]     = { .rx = std::regex("in(0)_input") };
             hwmon_sensors["fan_speed"]   = { .rx = std::regex("fan(1)_input") };
@@ -191,14 +171,13 @@ public:
             hwmon_sensors["power_limit"] = { .rx = std::regex("power(1)_max") };
         } else if (module == "xe") {
             hwmon_sensors["voltage"]     = { .rx = std::regex("in(1)_input") };
-            // technically, there are 3 fan sensors, but just pick first one
             hwmon_sensors["fan_speed"]   = { .rx = std::regex("fan(1)_input") };
             hwmon_sensors["temp"]        = { .rx = std::regex("temp(2)_input") };
             hwmon_sensors["vram_temp"]   = { .rx = std::regex("temp(3)_input") };
-            hwmon_sensors["energy"]    = { .rx = std::regex("energy(2)_input") };
+            hwmon_sensors["energy"]      = { .rx = std::regex("energy(2)_input") };
             hwmon_sensors["power_limit"] = { .rx = std::regex("power(2)_max") };
         } else {
-            // For everyone else just guess
+            // For everyone else (msm_drm / kgsl_adreno / panfrost etc.)
             hwmon_sensors["voltage"]   = { .rx = std::regex("in(\\d+)_input") };
             hwmon_sensors["fan_speed"] = { .rx = std::regex("fan(\\d+)_input") };
             hwmon_sensors["temp"]      = { .rx = std::regex("temp(\\d+)_input") };
@@ -214,7 +193,6 @@ public:
             find_xe_gt_dir();
 
         thread = std::thread(&GPU_fdinfo::main_thread, this);
-        // "mangohud-gpufdinfo" wouldn't fit in the 15 byte limit
         pthread_setname_np(thread.native_handle(), "mangohud-gpufd");
     }
 
@@ -224,22 +202,10 @@ public:
             thread.join();
     }
 
-    gpu_metrics copy_metrics() const
-    {
-        return metrics;
-    };
+    gpu_metrics copy_metrics() const { return metrics; };
 
-    void pause()
-    {
-        paused = true;
-        cond_var.notify_one();
-    }
-
-    void resume()
-    {
-        paused = false;
-        cond_var.notify_one();
-    }
+    void pause() { paused = true; cond_var.notify_one(); }
+    void resume() { paused = false; cond_var.notify_one(); }
 
     float amdgpu_helper_get_proc_vram();
 };
